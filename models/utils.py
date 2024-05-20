@@ -71,25 +71,7 @@ def multi_evaluation_result(label_true, score_predict):
         aupr_list.append(aupr)
     aupr = np.mean(aupr_list)
 
-    label_true = [np.argmax(v) for v in label_true]
-    label_predict = [np.argmax(v) for v in score_predict]
-    acc = metrics.accuracy_score(label_true, label_predict)
-    precision_micro = metrics.precision_score(label_true, label_predict,average='micro')
-    precision_macro = metrics.precision_score(label_true, label_predict,average='macro')
-    recall_micro = metrics.recall_score(label_true, label_predict,average='micro')
-    recall_macro = metrics.recall_score(label_true, label_predict,average='macro')
-    f1_micro = metrics.f1_score(label_true, label_predict,average='micro')
-    f1_macro = metrics.f1_score(label_true, label_predict,average='macro')
-
-    print(123)
     return {
-        'acc': acc,
-        'precision_micro': precision_micro,
-        'precision_macro': precision_macro,
-        'recall_micro': recall_micro,
-        'recall_macro': recall_macro,
-        'f1_micro': f1_micro,
-        'f1_macro': f1_macro,
         'auc': auc,
         'aupr': aupr,
         'auc_per_type': auc_list,
@@ -172,3 +154,25 @@ def drug_emb_from_feature_emb(drug_feature, feature_embedding):
         return np.matmul(drug_feature, feature_embedding)
     else:
         return drug_feature.matmul(feature_embedding)
+
+# def drug_emb_from_feature_emb(drug_feature, feature_embedding):
+#     """ 从蛋白特征嵌入获得药物的嵌入向量 """
+
+#     ret_type = type(drug_feature)
+#     if ret_type == np.ndarray:
+#         drug_feature = torch.tensor(drug_feature)
+#         feature_embedding = torch.tensor(feature_embedding)
+
+#     drug_emb = torch.zeros(
+#         drug_feature.shape[0], feature_embedding.shape[1]).float()
+#     for i in range(drug_feature.shape[0]):
+#         feature_index = torch.nonzero(drug_feature[i], as_tuple=True)[0]
+#         drug_embedding = torch.index_select(
+#             feature_embedding, 0, feature_index)
+#         drug_embedding = torch.mean(drug_embedding, dim=0)
+#         drug_emb[i] = drug_embedding
+
+#     if ret_type == np.ndarray:
+#         return drug_emb.numpy()
+#     else:
+#         return drug_emb

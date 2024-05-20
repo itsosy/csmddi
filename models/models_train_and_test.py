@@ -4,7 +4,7 @@
 @LastEditTime : 2020-01-14 09:24:13
 @LastEditors  : Please set LastEditors
 @Description: In User Settings Edit
-@FilePath: \models\models_train_and_test.py
+@FilePath: \ddi_classification\models\models_train_and_test.py
 '''
 
 
@@ -29,8 +29,10 @@ from .gae.utils import preprocess_graph
 from .gae.model import *
 from .gae.optimizer import loss_function as gae_loss
 from .rescal_tensor_factorization import als as rescal_tensor_factorization
+from .rescal_tensor_factorization2 import als2 as rescal_tensor_factorization2
 from .rescal_variant import *
 
+from .KGEmodel import KGEModel
 from torch.utils.data import DataLoader
 from .dataloader import TrainDataset
 from .dataloader import BidirectionalOneShotIterator
@@ -217,6 +219,23 @@ class ColdStartSVD(BaseModelTrain):
         return adj_recovered
 
 
+class ColdStartNMF(BaseModelTrain):
+    def __init__(self, config, data):
+        super(ColdStartNMF, self).__init__(config, data)
+
+    def train(self):
+        self.nmf = sk_nmf(
+            n_components=self.config['drug_hidden_embedding_dim'], init='random', random_state=42, solver='mu')
+        self.W = self.nmf.fit_transform(self.adj_train)
+        self.H = self.nmf.components_
+        self.train_embedding = self.H.T
+
+    def predict_test_S1(self,):
+        test_emb = self.feature_map_to_embedding()
+        score_predict_matrix = np.dot(test_emb, self.W.T)
+        return score_predict_matrix
+
+
 class ColdStartRescalTensorFactorization(BaseModelTrain):
     def __init__(self, config, data):
         super(ColdStartRescalTensorFactorization,
@@ -359,6 +378,339 @@ class ColdStartRescalFeatureEmbedding(ColdStartRescalTensorFactorizationTorch):
         self.test_embedding = drug_emb_from_feature_emb(
             self.test_feature, self.feature_embedding)
         return self.test_embedding
+
+
+class ColdStartRescalTensorFactorizationSymmetric(ColdStartRescalTensorFactorizationTorch):
+    """   在rescal基础上，关系矩阵对称约束 """
+
+    def __init__(self, config, data):
+        super(ColdStartRescalTensorFactorizationSymmetric,
+              self).__init__(config, data)
+
+    def train(self,):
+        self.model = RescalSymmetric(
+            config={
+                'entity_num': self.train_drugs_num,
+                'entity_embedding_dim': self.config['drug_hidden_embedding_dim'],
+                'relation_num': len(self.adj_list),
+                'device': self.config['device']
+            },
+            adj_list=self.adj_list,
+        )
+        self.train_()
+        self.train_embedding = self.model.E.detach().cpu().numpy()
+        self.relation_matrices = self.model.M.detach().cpu()
+
+        # 关系矩阵对称化
+
+        # 上三角矩阵对称
+        # self.relation_matrices = symmetric_matrix(
+        #     self.relation_matrices).numpy()
+        # 转置平均对称
+        self.relation_matrices = (
+            (self.relation_matrices + self.relation_matrices.permute(0, 2, 1))/2).numpy()
+
+
+class ColdStartRescalTensorFactorizationRelationSimilarity(ColdStartRescalTensorFactorizationTorch):
+    """   在rescal基础上，关系矩阵之间的相似性 """
+
+    def __init__(self, config, data):
+        super(ColdStartRescalTensorFactorizationRelationSimilarity,
+              self).__init__(config, data)
+
+    def train_(self):
+        self.model.to(device=self.config['device'])
+
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), weight_decay=0.001)
+
+        def loss_func():
+            optimizer.zero_grad()
+            loss = self.model()
+            loss.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            loss_similarity = self.model.more_similarity()
+            loss_similarity.backward()
+            optimizer.step()
+            return loss+loss_similarity
+
+        fit_model(loss_func=loss_func, model_name='Rescal',
+                  max_iter=self.config['epoch_num'])
+
+    def train(self,):
+        # 每个DDI类型关联的药物集合
+        # DDI_types_drugs = np.zeros(
+        #     (len(self.adj_list), self.train_drugs_num), dtype=np.int)
+        # for i in range(self.adj_train.shape[0]):
+        #     for j in range(i+1, self.adj_train.shape[1]):
+        #         DDI_type = self.adj_train[i, j]-1
+        #         if DDI_type >= 0:
+        #             DDI_types_drugs[DDI_type, i] = 1
+        #             DDI_types_drugs[DDI_type, j] = 1
+
+        # 每个DDI类型关联的蛋白，而不仅仅是关联药物
+        DDI_types_proteins = np.zeros(
+            (len(self.adj_list), self.data.feature.shape[1]), dtype=np.int)
+        for i in range(self.adj_train.shape[0]):
+            for j in range(i+1, self.adj_train.shape[1]):
+                DDI_type = self.adj_train[i, j]-1
+                if DDI_type >= 0:
+                    feature_i = self.data.feature[self.train_drugs_indices[i]].astype(
+                        np.int)
+                    feature_j = self.data.feature[self.train_drugs_indices[j]].astype(
+                        np.int)
+                    feature_or = np.bitwise_or(feature_i, feature_j)
+                    DDI_types_proteins[DDI_type] = np.bitwise_or(
+                        DDI_types_proteins[DDI_type], feature_or)
+
+        DDI_type_similarity = Jaccard(DDI_types_proteins)
+        DDI_type_similarity = np.nan_to_num(DDI_type_similarity)
+
+        self.model = RescalRelationSimilarity(
+            config={
+                'entity_num': self.train_drugs_num,
+                'entity_embedding_dim': self.config['drug_hidden_embedding_dim'],
+                'relation_num': len(self.adj_list),
+                'device': self.config['device']
+            },
+            adj_list=self.adj_list,
+            relation_similarity=DDI_type_similarity,
+        )
+        self.train_()
+        self.train_embedding = self.model.E.detach().cpu().numpy()
+        self.relation_matrices = self.model.M.detach().cpu().numpy()
+
+
+class ColdStartRescalTensorFactorizationTypeSpecificiEmbedding(ColdStartRescalTensorFactorizationTorch):
+    """   在rescal基础上，每个药物在每个DDI类型下都有嵌入 """
+
+    def __init__(self, config, data):
+        super(ColdStartRescalTensorFactorizationTypeSpecificiEmbedding,
+              self).__init__(config, data)
+
+    def train(self):
+        self.model = RescalTypeSpecificiEmbedding(
+            config={
+                'entity_num': self.train_drugs_num,
+                'entity_embedding_dim': self.config['drug_hidden_embedding_dim'],
+                'relation_num': len(self.adj_list),
+                'device': self.config['device']
+            },
+            adj_list=self.adj_list,
+        )
+
+        self.train_()
+
+        # 获取训练好的嵌入表示
+        self.train_embedding = self.model.E.detach().cpu().numpy()
+        self.train_embedding_maps = self.model.E_maps.detach().cpu().numpy()
+        self.relation_matrices = self.model.M.detach().cpu().numpy()
+
+    def predict_test_S1(self,):
+        test_embedding = self.feature_map_to_embedding()
+        test_embedding_multi = np.matmul(
+            test_embedding, self.train_embedding_maps)
+
+        train_embedding_multi = np.matmul(
+            self.train_embedding, self.train_embedding_maps)
+
+        score_predict_matrices = np.matmul(
+            np.matmul(test_embedding_multi, self.relation_matrices),
+            np.transpose(train_embedding_multi, axes=(0, 2, 1)))
+
+        if self.config['binary_or_multi'] == 'binary':
+            return score_predict_matrices[0, :, :]
+        else:
+            return score_predict_matrices
+
+    def predict_test_S2(self,):
+        test_embedding = self.feature_map_to_embedding()
+        test_embedding_multi = np.matmul(
+            test_embedding, self.train_embedding_maps)
+
+        score_predict_matrices = np.matmul(
+            np.matmul(test_embedding_multi, self.relation_matrices),
+            np.transpose(test_embedding_multi, axes=(0, 2, 1)))
+
+        if self.config['binary_or_multi'] == 'binary':
+            return score_predict_matrices[0, :, :]
+        else:
+            return score_predict_matrices
+
+
+class ColdStartRescalTensorFactorizationFeatureSimilarity(ColdStartRescalTensorFactorizationTorch):
+    """   在rescal基础上，属性特征相似性约束 """
+
+    def __init__(self, config, data):
+        super(ColdStartRescalTensorFactorizationFeatureSimilarity,
+              self).__init__(config, data)
+
+    def train_(self):
+        self.model.to(device=self.config['device'])
+
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), weight_decay=0.001)
+
+        def loss_func():
+            optimizer.zero_grad()
+            loss = self.model()
+            loss.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            loss_similarity = self.model.more_similarity()
+            loss_similarity.backward()
+            optimizer.step()
+            return loss+loss_similarity
+
+        fit_model(loss_func=loss_func, model_name='Rescal',
+                  max_iter=self.config['epoch_num'])
+
+    def train(self,):
+        feature_similarity = Jaccard(
+            self.data.feature[self.train_drugs_indices])
+        self.model = RescalFeatureSimilarity(
+            config={
+                'entity_num': self.train_drugs_num,
+                'entity_embedding_dim': self.config['drug_hidden_embedding_dim'],
+                'relation_num': len(self.adj_list),
+                'device': self.config['device']
+            },
+            adj_list=self.adj_list,
+            feature_similarity=feature_similarity,
+        )
+        self.train_()
+        self.train_embedding = self.model.E.detach().cpu().numpy()
+        self.relation_matrices = self.model.M.detach().cpu().numpy()
+
+
+class ColdStartRescalTensorFactorizationSymmetricFeatureSimilarity(ColdStartRescalTensorFactorizationFeatureSimilarity):
+    """   在rescal基础上，关系矩阵对称，属性特征相似性约束 """
+
+    def __init__(self, config, data):
+        super(ColdStartRescalTensorFactorizationSymmetricFeatureSimilarity,
+              self).__init__(config, data)
+
+    def train(self,):
+        feature_similarity = Jaccard(
+            self.data.feature[self.train_drugs_indices])
+        self.model = RescalFeatureSymmetricFeatureSimilarity(
+            config={
+                'entity_num': self.train_drugs_num,
+                'entity_embedding_dim': self.config['drug_hidden_embedding_dim'],
+                'relation_num': len(self.adj_list),
+                'device': self.config['device']
+            },
+            adj_list=self.adj_list,
+            feature_similarity=feature_similarity,
+        )
+        self.train_()
+        self.train_embedding = self.model.E.detach().cpu().numpy()
+        self.relation_matrices = self.model.M.detach().cpu()
+
+        # 关系矩阵对称化
+        self.relation_matrices = symmetric_matrix(
+            self.relation_matrices).numpy()
+
+
+class ColdStartRescalTensorFactorizationSymmetricRelationSimilarityFeatureSimilarity(ColdStartRescalTensorFactorizationSymmetricFeatureSimilarity):
+    """   在rescal基础上，关系矩阵对称，关系矩阵相似，属性特征相似 """
+
+    def __init__(self, config, data):
+        super(ColdStartRescalTensorFactorizationSymmetricRelationSimilarityFeatureSimilarity,
+              self).__init__(config, data)
+
+    def train(self,):
+        DDI_types_drugs = np.zeros(
+            (len(self.adj_list), self.train_drugs_num), dtype=np.int)
+        for i in range(self.adj_train.shape[0]):
+            for j in range(i+1, self.adj_train.shape[1]):
+                DDI_type = self.adj_train[i, j]-1
+                if DDI_type >= 0:
+                    DDI_types_drugs[DDI_type, i] = 1
+                    DDI_types_drugs[DDI_type, j] = 1
+
+        DDI_type_similarity = Jaccard(DDI_types_drugs)
+        DDI_type_similarity = np.nan_to_num(DDI_type_similarity)
+
+        feature_similarity = Jaccard(
+            self.data.feature[self.train_drugs_indices])
+
+        self.model = RescalSymmetricRelationSimilarityFeatureSimilarity(
+            config={
+                'entity_num': self.train_drugs_num,
+                'entity_embedding_dim': self.config['drug_hidden_embedding_dim'],
+                'relation_num': len(self.adj_list),
+                'device': self.config['device']
+            },
+            adj_list=self.adj_list,
+            relation_similarity=DDI_type_similarity,
+            feature_similarity=feature_similarity,
+        )
+        self.train_()
+        self.train_embedding = self.model.E.detach().cpu().numpy()
+        self.relation_matrices = self.model.M.detach().cpu()
+
+        # 关系矩阵对称化
+        self.relation_matrices = symmetric_matrix(
+            self.relation_matrices).numpy()
+
+
+class ColdStartRescalTensorFactorizationSymmetricTypeSpecificiEmbeddingFeatureSimilarity(ColdStartRescalTensorFactorizationTypeSpecificiEmbedding):
+    """   在rescal基础上，关系矩阵对称，DDI类型下特定嵌入，属性特征相似 """
+
+    def __init__(self, config, data):
+        super(ColdStartRescalTensorFactorizationSymmetricTypeSpecificiEmbeddingFeatureSimilarity,
+              self).__init__(config, data)
+
+    def train_(self):
+        self.model.to(device=self.config['device'])
+
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), weight_decay=0.001)
+
+        def loss_func():
+            optimizer.zero_grad()
+            loss = self.model()
+            loss.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            loss_similarity = self.model.more_similarity()
+            loss_similarity.backward()
+            optimizer.step()
+            return loss+loss_similarity
+
+        fit_model(loss_func=loss_func, model_name='Rescal',
+                  max_iter=self.config['epoch_num'])
+
+    def train(self):
+        feature_similarity = Jaccard(
+            self.data.feature[self.train_drugs_indices])
+
+        self.model = RescalSymmetricTypeSpecificiEmbeddingFeatureSimilarity(
+            config={
+                'entity_num': self.train_drugs_num,
+                'entity_embedding_dim': self.config['drug_hidden_embedding_dim'],
+                'relation_num': len(self.adj_list),
+                'device': self.config['device']
+            },
+            adj_list=self.adj_list,
+            feature_similarity=feature_similarity,
+        )
+
+        self.train_()
+
+        # 获取训练好的嵌入表示
+        self.train_embedding = self.model.E.detach().cpu().numpy()
+        self.train_embedding_maps = self.model.E_maps.detach().cpu().numpy()
+        self.relation_matrices = self.model.M.detach().cpu()
+
+        # 关系矩阵对称化
+        self.relation_matrices = symmetric_matrix(
+            self.relation_matrices).numpy()
 
 
 class ColdStartRelationLearning(BaseModelTrain):
@@ -543,6 +895,28 @@ class ColdStartRelationLearning(BaseModelTrain):
             return score_predict_matrices[0, :, :]
         else:
             return score_predict_matrices
+
+    # def predict_test_S1(self,):
+    #     test_emb = torch.FloatTensor(
+    #         self.feature_map_to_embedding())
+
+    #     score_predict_matrices = np.zeros(
+    #         (self.data.interaction_num, self.test_drugs_num, self.train_drugs_num))
+    #     relation_embedding = self.model_relation_learning.relation_embedding.detach()
+    #     for relation_idx in range(1, self.data.interaction_num):
+    #         for i in range(self.test_drugs_num):
+    #             for j in range(self.train_drugs_num):
+    #                 h = test_emb[i].view(1, -1)
+    #                 t = self.train_embedding[j].view(1, -1)
+    #                 r = torch.index_select(
+    #                     relation_embedding,
+    #                     dim=0,
+    #                     index=torch.tensor([relation_idx])
+    #                 )
+
+    #                 score = self.model_relation_learning.score(h, r, t)
+    #                 score_predict_matrices[relation_idx, i, j] = score
+    #     return score_predict_matrices
 
 
 class LabelPropogation():
@@ -803,7 +1177,6 @@ class ColdStartDDIMDL(BaseModelTrain):
                     self.positive_triples_all.append(
                         (row, interaction_idx, col))
 
-
         # 三元组按批次加载
         self.dataloader = DataLoader(
             TrainDataset(self.positive_triples_all,
@@ -876,7 +1249,6 @@ class ColdStartDDIMDL(BaseModelTrain):
                     optimizer.zero_grad()
 
                     loss += loss_batch
-                    break
             if torch.isnan(loss):
                 return np.inf
             return loss

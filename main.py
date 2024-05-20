@@ -19,7 +19,7 @@ from sklearn.utils import shuffle
 from models.DataModel import DataModel
 from models.feature_learning import PLSR, GBR
 
-# 交叉验证函数
+
 def cross_validation(config):
 
     # 导入数据
@@ -64,25 +64,69 @@ def cross_validation(config):
 
     return ret
 
+
+def compute_feature_mapping_loss(config):
+    # 导入数据
+    data = np.load(config['data_path'],
+                   allow_pickle=True)['data'].item()
+    data = DataModel(data, adj_selector=config['adj'])
+
+    # 导入模型
+    module = importlib.import_module('models.models_train_and_test')
+    model = getattr(
+        module, config['model_name'])(config, data)
+
+    drug_indices = list(range(data.drug_num))
+    model.init(drug_indices, [])
+    model.train()
+
+    np.savez_compressed('analysis/data_RESCAL_Symmetric_trained_embedding.npz',
+                        data={
+                            'adj_multi': model.adj_list,
+                            'drug_embedding': model.train_embedding,
+                            'relation_embedding': model.relation_matrices,
+                        })
+
+    # score_predict_matrices = np.matmul(
+    #     np.matmul(model.train_embedding, model.relation_matrices), model.train_embedding.T)
+    # np.savez_compressed('analysis/data_RESCAL_case_study.npz',
+    #                     data=score_predict_matrices)
+
+    # feature = data.feature
+    # embedding = model.train_embedding
+
+    # plsr = PLSR()
+    # plsr.fit(feature, embedding)
+    # embedding_pred = plsr.predict(feature)
+    # print('plsr mapping 平方和: {}'.format(np.sum((embedding-embedding_pred)**2)))
+    # loss = sklearn.metrics.mean_squared_error(embedding, embedding_pred)
+    # print("plsr mapping loss: {}".format(loss))
+
+    # gbr = GBR()
+    # gbr.fit(feature, embedding)
+    # embedding_pred = gbr.predict(feature)
+    # print('gbr mapping 平方和: {}'.format(np.sum((embedding-embedding_pred)**2)))
+    # loss = sklearn.metrics.mean_squared_error(embedding, embedding_pred)
+    # print("gbr mapping loss: {}".format(loss))
+
+
 if __name__ == "__main__":
 
     config = {
         'data_path': 'data/drugbank_v5_stanfordnlp.npz',
         'adj': 'adj_multi',
-        'binary_or_multi': ['binary'],
-        'S1_or_S2': ['S1'],
+        'binary_or_multi': 'multi',
+        'S1_or_S2': 'S1',
 
-        'model_name': ['ColdStartRescalTensorFactorizationTorch'],
-        # 'model_name': ['ColdStartRelationLearning'],
+        'model_name': 'ColdStartRelationLearning',
         'relation_learning_model': 'TransE',
 
-        # 'map_model': 'PLSR',
-        'map_model': 'GBR',
+        'map_model': 'PLSR',
 
         'drug_hidden_embedding_dim': 200,
-        'batch_size': 512,
+        'batch_size': 200,
         'learning_rate': 0.01,
-        'epoch_num': 10,
+        'epoch_num': 1000,
 
         'cv': 10,
         'shuffle_drug': True,
@@ -90,9 +134,9 @@ if __name__ == "__main__":
         'device': 'cuda' if torch.cuda.is_available() else 'cpu'
     }
 
-    for model_name in config['model_name']:
-        for S1_or_S2 in config['S1_or_S2']:
-            for binary_or_multi in config['binary_or_multi']:
+    for model_name in ['ColdStartDDIMDL']:
+        for binary_or_multi in ['multi', 'binary']:
+            for S1_or_S2 in ['S1', 'S2']:
                 config.update({
                     'model_name': model_name,
                     'adj': 'adj_{}'.format(binary_or_multi),
@@ -102,10 +146,9 @@ if __name__ == "__main__":
                 print(config)
                 res = cross_validation(config)
                 print("\n\n")
-                print(res)
                 for key in res:
                     if isinstance(res[key][0], float):
                         print('{}: {:.4f} +/- {:.4f}'.format(key,
-                                                            res[key][0], res[key][1]))
+                                                             res[key][0], res[key][1]))
                 np.savez_compressed('analysis/result_{}_type_{}_{}_{}.npz'.format(
                     config['binary_or_multi'], config['S1_or_S2'], config['model_name'], config['map_model']), data=res)

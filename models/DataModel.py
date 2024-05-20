@@ -4,7 +4,7 @@
 @LastEditTime : 2019-12-26 10:30:30
 @LastEditors  : Please set LastEditors
 @Description: In User Settings Edit
-@FilePath: \models\BaseDataModel.py
+@FilePath: \ddi_classification\models\BaseDataModel.py
 '''
 
 import numpy as np
@@ -44,6 +44,19 @@ class DataModel():
         self.load_features(features)
         self.interaction_num = self.adj.max().astype(np.int).item()+1
 
+        # 提取drug对应的类型
+        # drug_class_file = 'data/drug_class.csv'
+        # self.drug_class_map = {}
+        # with open(drug_class_file) as f:
+        #     f_csv = csv.reader(f)
+        #     next(f_csv)
+        #     for row in f_csv:
+        #         self.drug_class_map[row[0]] = row[1]
+        # drug_class_list = []
+        # for drug_id in self.drug_ids:
+        #     drug_class_list.append(self.drug_class_map.get(drug_id, 'unknown'))
+        # # drug_class 类型字符串转数字
+        # self.drug_class = LabelEncoder().fit_transform(drug_class_list)
 
     def load_features(self, features):
         """ 导入特征, 并做降维预处理 """
